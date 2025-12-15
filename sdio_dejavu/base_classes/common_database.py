@@ -241,6 +241,56 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
 
             return results, dedup_hashes
 
+    def return_matches_by_table(
+            self, 
+            hashes: List[Tuple[str, int]],
+            table_name:str,
+            batch_size: int = 1000
+        ) -> Tuple[List[Tuple[int, int]], Dict[int, int]]:
+        """
+        Searches the database for pairs of (hash, offset) values.
+
+        :param hashes: A sequence of tuples in the format (hash, offset)
+            - hash: Part of a sha1 hash, in hexadecimal format
+            - offset: Offset this hash was created from/at.
+        :param batch_size: number of query's batches.
+        :return: a list of (sid, offset_difference) tuples and a
+        dictionary with the amount of hashes matched (not considering
+        duplicated hashes) in each song.
+            - song id: Song identifier
+            - offset_difference: (database_offset - sampled_offset)
+        """
+        # Create a dictionary of hash => offset pairs for later lookups
+        # Normalize all hashes to uppercase once
+        mapper = defaultdict(list)
+        for hsh, offset in hashes:
+            mapper[hsh.upper()].append(offset)
+
+        values = list(mapper.keys())
+        dedup_hashes = defaultdict(int)
+        # in order to count each hash only once per db offset we use the dic below
+        results = []
+        
+        with self.cursor() as cur:
+            for index in range(0, len(values), batch_size):
+                # Create our IN part of the query
+                query = self.SELECT_MULTIPLE1 + table_name + self.SELECT_MULTIPLE2 % ', '.join([self.IN_MATCH] * len(values[index: index + batch_size]))
+
+                cur.execute(query, values[index: index + batch_size])
+
+                # Iterate over all DB matches
+                for hsh, sid, db_offset in cur:
+                    dedup_hashes[sid] += 1
+                    # vectorized offset diff append (faster than nested loop append)
+                    sample_offsets = mapper[hsh]
+                    diff = db_offset - sample_offsets[0]
+                    if len(sample_offsets) == 1:
+                        results.append((sid, diff))
+                    else:
+                        results.extend((sid, db_offset - s_off) for s_off in sample_offsets)
+
+            return results, dedup_hashes
+
     def delete_songs_by_id(self, song_ids: List[int], batch_size: int = 1000) -> None:
         """
         Given a list of song ids it deletes all songs specified and their corresponding fingerprints.

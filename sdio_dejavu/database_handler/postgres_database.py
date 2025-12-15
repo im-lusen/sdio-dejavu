@@ -79,6 +79,14 @@ class PostgreSQLDatabase(CommonDatabase):
         WHERE "{FIELD_HASH}" IN (%s);
     """
 
+    SELECT_MULTIPLE1 = f"""
+        SELECT upper(encode("{FIELD_HASH}", 'hex')), "{FIELD_SONG_ID}", "{FIELD_OFFSET}"
+        FROM """
+
+    SELECT_MULTIPLE2 = f"""    
+        WHERE "{FIELD_HASH}" IN (%s);
+    """
+
     SELECT_ALL = f'SELECT "{FIELD_SONG_ID}", "{FIELD_OFFSET}" FROM "{FINGERPRINTS_TABLENAME}";'
 
     SELECT_SONG = f"""

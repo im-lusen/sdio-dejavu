@@ -279,11 +279,68 @@ class Dejavu:
          hashes matched for each song (with the song id as key), and the time that the query took.
 
         """
-        t = time()
+        t = time.time()
         matches, dedup_hashes = self.db.return_matches(hashes)
-        query_time = time() - t
+        query_time = time.time() - t
 
         return matches, dedup_hashes, query_time
+
+    def find_matches_by_table(self, hashes: List[Tuple[str, int]],table_name:str) -> Tuple[List[Tuple[int, int]], Dict[str, int], float]:
+        """
+        Finds the corresponding matches on the fingerprinted audios for the given hashes.
+
+        :param hashes: list of tuples for hashes and their corresponding offsets
+        :return: a tuple containing the matches found against the db, a dictionary which counts the different
+         hashes matched for each song (with the song id as key), and the time that the query took.
+
+        """
+        t = time.time()
+        matches, dedup_hashes = self.db.return_matches_by_table(hashes,table_name)
+        query_time = time.time() - t
+
+        return matches, dedup_hashes, query_time
+
+    def find_similar_ads(
+        self, 
+        song_name: str, 
+        table_name:str,
+        confidence_threshold=0.05
+    ):
+
+        songs_list = self.db.get_songs() 
+        
+        songs = {row["song_name"]: row for row in songs_list}
+
+        if song_name not in songs:
+            return []
+
+        
+        song_id = songs[song_name][SONG_ID]
+        #print(f"Retrieved song_id {song_id}")
+
+        
+        with self.db.cursor(dictionary=True) as cur:
+            cur.execute(
+                f'SELECT upper(encode("hash", \'hex\')) AS hash, "offset" '
+                f'FROM fingerprints WHERE "song_id" = %s;',
+                (song_id,)
+            )
+            hashes = [(r["hash"], r["offset"]) for r in cur.fetchall()]
+        #print(f"Getting FP {len(hashes)}")
+
+        #print("find_matches")
+        matches, dedup_hashes, _ = self.find_matches_by_table(hashes,table_name)
+
+        #print("align_matches")
+        results = self.align_matches(
+            matches,
+            dedup_hashes,
+            queried_hashes=len(hashes),
+            confidence_threshold=confidence_threshold
+        )
+
+
+        return [res[SONG_NAME].decode("utf8") for res in results if res[SONG_ID] != song_id]
 
     def align_matches(self, matches: List[Tuple[int, int]], dedup_hashes: Dict[str, int], queried_hashes: int,
                       topn: int = TOPN,confidence_threshold:float = 0.05) -> List[Dict[str, any]]:
