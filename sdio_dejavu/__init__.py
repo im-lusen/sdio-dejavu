@@ -239,9 +239,7 @@ class Dejavu:
             ):
         try:
             _, hashes, _ = Dejavu._fingerprint_worker(
-                    file_path,
-                    self.limit,
-                    song_name=song_name
+                     (file_path, self.limit)
                 )
         except Exception as e:
             logger.exception(f"Failed generating fingerprint for file {file_path} {e}")
@@ -317,15 +315,67 @@ class Dejavu:
 
         return matches, dedup_hashes, query_time
 
+    def find_similar_ads_by_days(
+        self,
+        song_name: str,
+        days: int,
+        threshold: float = 0.1,
+        target_day: date | None = None,
+    ) -> list[str]:
+        """
+        Find similar ads by reusing find_similar_ads across multiple daily tables.
+
+        - If target_day is None: search from today backwards
+        - If target_day is set: search from target_day backwards
+
+        Returns deduplicated list of similar song_name.
+        """
+
+        start_day = target_day or date.today()
+        matched_songs = set()
+
+        for i in range(days):
+            d = start_day - timedelta(days=i)
+            table_name = f"fingerprints_{d.strftime('%Y_%m_%d')}"
+
+            logger.debug(
+                f"Searching similar ads for {song_name} in {table_name}"
+            )
+
+            try:
+                results = self.find_similar_ads(
+                    song_name=song_name,
+                    table_name=table_name,
+                    confidence_threshold=threshold,
+                )
+            except Exception as e:
+                # table not exist / query failed
+                logger.debug(f"Skip table {table_name}: {e}")
+                continue
+
+            for r in results:
+                matched_songs.add(r)
+
+
+        return sorted(matched_songs)
+
+
     def find_similar_cms(
         self,
         media_path: str,
         days: int,
         threshold: float = 0.1,
-    ) -> list[str]:
+        target_day: date | None = None,
+        enable_align: bool = True,
+    ) -> List[str]:
         """
         Find similar CMs by fingerprinting a media file and
-        searching fingerprints_yyyy_mm_dd tables from today backwards.
+        searching fingerprints_yyyy_mm_dd tables.
+
+        - If target_day is None: search from today backwards
+        - If target_day is set: search from target_day backwards
+        - If enable_align is True: use align_matches (default, high precision)
+        - If enable_align is False: return songs with any hash match (high recall)
 
         Returns a list of matched song_name (deduplicated).
         """
@@ -344,13 +394,16 @@ class Dejavu:
 
         matched_songs = set()
 
-        today = date.today()
+        # --------------------------------------------------
+        # 2. Decide start day
+        # --------------------------------------------------
+        start_day = target_day or date.today()
 
         # --------------------------------------------------
-        # 2. Iterate over days (today -> today - days)
+        # 3. Iterate over days
         # --------------------------------------------------
         for i in range(days):
-            d = today - timedelta(days=i)
+            d = start_day - timedelta(days=i)
             table_name = f"fingerprints_{d.strftime('%Y_%m_%d')}"
 
             logger.debug(f"Searching table {table_name}")
@@ -368,22 +421,38 @@ class Dejavu:
                 continue
 
             # --------------------------------------------------
-            # 3. Align matches & filter by confidence
+            # 4A. Precision mode (align_matches)
             # --------------------------------------------------
-            results = self.align_matches(
-                matches,
-                dedup_hashes,
-                queried_hashes=len(hashes),
-                confidence_threshold=threshold,
-            )
+            if enable_align:
+                results = self.align_matches(
+                    matches,
+                    dedup_hashes,
+                    queried_hashes=len(hashes),
+                    confidence_threshold=threshold,
+                )
 
-            for res in results:
-                try:
-                    song_name = res[SONG_NAME].decode("utf8")
-                except Exception:
-                    song_name = str(res[SONG_NAME])
+                for res in results:
+                    try:
+                        song_name = res[SONG_NAME].decode("utf8")
+                    except Exception:
+                        song_name = str(res[SONG_NAME])
 
-                matched_songs.add(song_name)
+                    matched_songs.add(song_name)
+
+            # --------------------------------------------------
+            # 4B. Recall mode (no align)
+            # --------------------------------------------------
+            else:
+                for song_id in dedup_hashes.keys():
+                    try:
+                        song_name = self.db.get_song_by_id(song_id)[SONG_NAME]
+                        if isinstance(song_name, bytes):
+                            song_name = song_name.decode("utf8")
+                    except Exception:
+                        continue
+
+                    matched_songs.add(song_name)
+
 
         return sorted(matched_songs)
 
