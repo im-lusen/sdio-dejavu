@@ -24,7 +24,8 @@ ALIGN_TIME = 'align_time'
 OFFSET = 'offset'
 OFFSET_SECS = 'offset_seconds'
 
-BLACKLISTED_HASH64_COUNT = 500
+BLACKLISTED_HASH64_COUNT = 3000
+ENABLE_BLACKLISTING = False
 
 # DATABASE CLASS INSTANCES:
 DATABASES = {
@@ -49,6 +50,9 @@ FINGERPRINTS_TABLENAME = "fp_audio_fingerprints_prod"
 FIELD_HASH = 'hash'
 FIELD_HASH64 = 'hash64'
 FIELD_OFFSET = 'offset'
+FIELD_SONG_ID_FP = 'song'
+
+FP_LOAD_BATCHSIZE = 5000
 
 # FINGERPRINTS CONFIG:
 # This is used as connectivity parameter for scipy.generate_binary_structure function. This parameter

@@ -80,10 +80,16 @@ class PostgreSQLDatabase(CommonDatabase):
     ON "{FINGERPRINTS_TABLENAME}" ("{FIELD_SONG_ID}");
     """
 
+    CREATE_FINGERPRINTS_TABLE_INDEX_ALL = f"""
+    CREATE INDEX CONCURRENTLY idx_fingerprints_lookup_optimized 
+    ON {FINGERPRINTS_TABLENAME} ({FIELD_HASH64}) 
+    INCLUDE ({FIELD_SONG_ID}, "{FIELD_OFFSET}");"""
+
     CREATE_FINGERPRINTS_TABLE_SQL = (
         CREATE_FINGERPRINTS_TABLE_DEFAULT
         + CREATE_FINGERPRINTS_TABLE_INDEX_HASH64
         + CREATE_FINGERPRINTS_TABLE_INDEX_SONGID
+        + CREATE_FINGERPRINTS_TABLE_INDEX_ALL
     )
 
 
@@ -145,6 +151,18 @@ class PostgreSQLDatabase(CommonDatabase):
         JOIN "{SONGS_TABLENAME}" c
             ON f."{FIELD_SONG_ID}" = c."{FIELD_SONG_ID}"
         WHERE c."{FIELD_SONGNAME}" = %s
+        ORDER BY f."{FIELD_OFFSET}";
+    """
+
+    SELECT_FINGERPRINTS_BY_SONG_NAME_LIST = f"""
+        SELECT
+            c."{FIELD_SONGNAME}",
+            f."{FIELD_HASH64}",
+            f."{FIELD_OFFSET}"
+        FROM "{FINGERPRINTS_TABLENAME}" f
+        JOIN "{SONGS_TABLENAME}" c
+            ON f."{FIELD_SONG_ID}" = c."{FIELD_SONG_ID}"
+        WHERE c."{FIELD_SONGNAME}" IN ({{}})
         ORDER BY f."{FIELD_OFFSET}";
     """
 

@@ -6,12 +6,20 @@ from loguru import logger
 from psycopg2.extras import execute_batch
 import time
 from functools import lru_cache
-from sdio_dejavu.config.settings import (FIELD_FILE_SHA1, FIELD_FINGERPRINTED,
-                                    FIELD_HASH, FIELD_OFFSET, FIELD_SONG_ID,
-                                    FIELD_SONGNAME, FIELD_TOTAL_HASHES,
-                                    FINGERPRINTS_TABLENAME, SONGS_TABLENAME,DAILY_PARTITION,
-                                    BLACKLISTED_HASH64_COUNT,
-                                    )
+from sdio_dejavu.config.settings import (
+    FIELD_FILE_SHA1, 
+    FIELD_FINGERPRINTED,
+    FIELD_HASH, 
+    FIELD_OFFSET, 
+    FIELD_SONG_ID,
+    FIELD_SONGNAME, 
+    FIELD_TOTAL_HASHES,
+    FINGERPRINTS_TABLENAME, 
+    SONGS_TABLENAME,
+    DAILY_PARTITION,
+    BLACKLISTED_HASH64_COUNT,
+    FP_LOAD_BATCHSIZE,
+    )
 
 class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
     # Since several methods across different databases are actually just the same
@@ -20,6 +28,10 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
 
     def __init__(self):
         super().__init__()
+        self.blacklisted_hashes:set[int] = []
+
+    def set_blacklisted_hashes(self,blacklisted_hashes:set[int]):
+        self.blacklisted_hashes = blacklisted_hashes
 
     def before_fork(self) -> None:
         """
@@ -96,7 +108,7 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
         return count
 
     @lru_cache(maxsize=1)
-    def _get_blacklisted_hashes(
+    def get_blacklisted_hashes(
         self, 
         threshold: int = BLACKLISTED_HASH64_COUNT,
     ) -> set[int]:
@@ -183,7 +195,7 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
             [(hex_hash, hash64, offset), ...]
         """
 
-        results: list[Tuple[str, int, int]] = []
+        results: list[Tuple[int, int]] = []
 
         with self.cursor() as cur:
             cur.execute(
@@ -201,6 +213,47 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
                 )
 
         return results
+    
+    def get_fingerprints_by_song_name_list(
+        self,
+        cm_ids: list[str],
+        batch_size:int = FP_LOAD_BATCHSIZE,
+    ) -> dict[str,list[Tuple[int, int]]]:
+        """
+        Fetch fingerprints for a given cm_id.
+
+        Returns:
+            [(hex_hash, hash64, offset), ...]
+        """
+        all_fps = defaultdict(list)
+        total = len(cm_ids)
+        logger.info(f"Starting to load fingerprints for {total} CMs...")
+        for i in range(0, total, batch_size):
+            batch = cm_ids[i:i + batch_size]
+            placeholders = ','.join(['%s'] * len(batch))
+            current_sql = self.SELECT_FINGERPRINTS_BY_SONG_NAME_LIST.format(placeholders)
+            try:
+                with self.cursor() as cur:
+                    cur.execute(
+                        current_sql,
+                        batch
+                    )
+                    rows_fetched = 0
+                    for cm_name, hash64, offset in cur:
+                        # defensive: hash64 must exist
+                        if hash64 is not None:
+                            all_fps[cm_name].append((int(hash64), int(offset)))
+                            rows_fetched += 1
+                    logger.debug(f"Batch {i//batch_size + 1}: Queried {len(batch)} CMs, Found {rows_fetched} fingerprint rows.")
+            except Exception as e:
+                logger.error(f"Error in batch {i}: {e}")
+                raise e
+        logger.success(f"Fingerprint loading complete. Total unique CMs in map: {len(all_fps)}")
+
+        missing = set(cm_ids) - set(all_fps.keys())
+        if missing:
+            logger.warning(f"{len(missing)} CMs had no fingerprints found in DB. Sample: {list(missing)[:3]}")
+        return all_fps
 
     def insert(self, fingerprint: str, song_id: int, offset: int):
         """
@@ -353,12 +406,11 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
             verbose:bool = False,
         ) -> tuple[list[tuple[int, int]], dict[int, int]]:
         t_start = time.perf_counter()
-        blacklisted = self._get_blacklisted_hashes()
         blocked = 0
         # 1. 预处理
         mapper = defaultdict(list)
         for hash64, offset in hashes:
-            if hash64 not in blacklisted:
+            if hash64 not in self.blacklisted_hashes:
                 mapper[hash64].append(offset)
             else:
                 blocked+=1

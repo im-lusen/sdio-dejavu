@@ -16,13 +16,27 @@ import sdio_dejavu.logic.decoder as decoder
 from tqdm import tqdm
 from sdio_dejavu.base_classes.base_database import get_database
 import time
-from sdio_dejavu.config.settings import (DEFAULT_FS, DEFAULT_OVERLAP_RATIO,
-                                    DEFAULT_WINDOW_SIZE, FIELD_FILE_SHA1,
-                                    FIELD_TOTAL_HASHES,
-                                    FINGERPRINTED_CONFIDENCE,
-                                    FINGERPRINTED_HASHES, HASHES_MATCHED,
-                                    INPUT_CONFIDENCE, INPUT_HASHES, OFFSET,
-                                    OFFSET_SECS, SONG_ID, SONG_NAME, TOPN,SONGS_TABLENAME)
+from sdio_dejavu.config.settings import (
+    DEFAULT_FS, 
+    DEFAULT_OVERLAP_RATIO,
+    DEFAULT_WINDOW_SIZE, 
+    FIELD_FILE_SHA1,
+    FIELD_TOTAL_HASHES,
+    FINGERPRINTED_CONFIDENCE,
+    FINGERPRINTED_HASHES, 
+    HASHES_MATCHED,
+    INPUT_CONFIDENCE, 
+    INPUT_HASHES, 
+    OFFSET,
+    OFFSET_SECS, 
+    SONG_ID, 
+    SONG_NAME, 
+    TOPN,
+    SONGS_TABLENAME,
+    FIELD_HASH64,
+    FIELD_SONG_ID_FP,
+    FINGERPRINTS_TABLENAME,
+    )
 from sdio_dejavu.logic.fingerprint import fingerprint,filter_result,enrich_hash64
 from loguru import logger
 
@@ -358,12 +372,30 @@ class Dejavu:
         return match_names
         """
     
+    def set_blacklisted_hashes(self,blacklisted_hashes:set[int]):
+        self.db.set_blacklisted_hashes(blacklisted_hashes)
+    
+    def get_blacklisted_hashes(self)->set[int]:
+        return self.db.get_blacklisted_hashes()
+
+    def prefetch_fingerprints_batch(
+            self, 
+            cm_ids: list[str],
+        )->dict[str,list[Tuple[int,int]]]:
+        """
+        Fetch all fingerprints for a list of songs in ONE query.
+        """
+        if not cm_ids: return {}
+        
+        return self.db.get_fingerprints_by_song_name_list(cm_ids)
+
     def get_similar_cm_ids_hash64(
             self, 
             cm_id: str,
             threshold: float = 0.3,
             use_unnest: bool = False,
             verbose: bool = False,
+            hashes: list[Tuple[str,str]] = None,
             ) -> list[str]:
         
         metrics = {}
@@ -373,7 +405,10 @@ class Dejavu:
         metrics["parse_origin_duration"] = time.time() - start
         
         t_now = time.time()
-        hashes = self.db.get_fingerprints_by_song_name(cm_id)
+        if hashes:
+            pass
+        else:
+            hashes = self.db.get_fingerprints_by_song_name(cm_id)
         metrics["get_fingerprints"] = time.time() - t_now
         
         t_now = time.time()
@@ -502,26 +537,20 @@ class Dejavu:
 
     @lru_cache(maxsize=1)
     def _get_song_map_name_str(self) -> dict[str, dict]:
-        """
-        Cache song_name -> song row mapping.
-
-        Returns:
-            {
-              song_name: {
-                song_id: ...,
-                song_name: ...,
-                ...
-              }
-            }
-        """
-        query = f'SELECT * FROM {SONGS_TABLENAME}  WHERE fingerprinted = 1 ;'
+        query = f'SELECT * FROM {SONGS_TABLENAME} WHERE fingerprinted = 1;'
         with self.db.cursor(dictionary=True) as cur:
-            cur.execute(
-                query
-            )
-            rows = cur.fetchall()
+            cur.execute(query)
+            rows = [dict(row) for row in cur] 
 
-        return {row[SONG_NAME]: row for row in rows}
+        processed_map = {}
+        for row in rows:
+            name = row[SONG_NAME]
+            if hasattr(name, "tobytes"):
+                row[SONG_NAME] = name.tobytes().decode("utf-8")
+            
+            processed_map[row[SONG_NAME]] = row
+            
+        return processed_map
 
     def refresh_song_map(self) -> None:
         """Call this if songs table is updated."""
@@ -619,7 +648,7 @@ class Dejavu:
         return results
 
 
-    def align_matches_hash64(self, matches, dedup_hashes, queried_hashes, topn=TOPN, confidence_threshold=0.05):
+    def align_matches_hash64(self, matches, dedup_hashes, queried_hashes, topn=None, confidence_threshold=0.05):
         """
         Finds hash matches that align in time and consensus using in-memory metadata.
         """
@@ -694,7 +723,7 @@ class Dejavu:
             matches: list[Tuple[int, int]], 
             dedup_hashes: dict[str, int], 
             queried_hashes: int,
-            topn: int = TOPN,
+            topn: int = None,
             confidence_threshold:float = 0.05,
             use_unnest:bool = False,
             verbose:bool = False,
