@@ -120,23 +120,33 @@ class Dejavu:
         submitted: dict[concurrent.futures.Future, str] = {}
 
         pending: list[tuple[str, list, str]] = []
+        total_hashes = 0
+        total_db_time = 0.0
+        total_wait_time = 0.0
+        total_flushes = 0
 
         def flush_pending():
+            nonlocal total_db_time, total_flushes, total_hashes
             if not pending:
                 return
+            t0 = time.perf_counter()
             with self.db.cursor() as cur:
                 if is_copy and hasattr(self.db, "insert_hashes_copy_batch"):
                     batch = []
                     for song_name, hashes, file_hash in pending:
                         sid = self.db.insert_song(song_name, file_hash, len(hashes), cur=cur)
                         batch.append((sid, hashes))
+                        total_hashes += len(hashes)
                         self.db.set_song_fingerprinted(sid, cur=cur)
                     self.db.insert_hashes_copy_batch(batch, cur=cur)
                 else:
                     for song_name, hashes, file_hash in pending:
                         sid = self.db.insert_song(song_name, file_hash, len(hashes), cur=cur)
+                        total_hashes += len(hashes)
                         self.db.insert_hashes(sid, hashes, batch_size=hash_batch_size, cur=cur)
                         self.db.set_song_fingerprinted(sid, cur=cur)
+            total_db_time += time.perf_counter() - t0
+            total_flushes += 1
             pending.clear()
 
         with ProcessPoolExecutor(
@@ -157,7 +167,9 @@ class Dejavu:
             for fut in as_completed(submitted):
                 filename = submitted[fut]
                 try:
+                    t_wait0 = time.perf_counter()
                     song_name, hashes, file_hash = fut.result(timeout=timeout_s)
+                    total_wait_time += time.perf_counter() - t_wait0
 
                     pending.append((song_name, hashes, file_hash))
                     if len(pending) >= db_batch_size:
@@ -180,6 +192,15 @@ class Dejavu:
             f"[FP] done. ok={total - len(failed_files)} "
             f"fail={len(failed_files)} "
             f"elapsed={time.perf_counter() - start_time:.1f}s"
+        )
+        elapsed = time.perf_counter() - start_time
+        logger.info(
+            f"[FP] stats: files={total} "
+            f"hashes={total_hashes} "
+            f"wait_time={total_wait_time:.2f}s "
+            f"db_time={total_db_time:.2f}s "
+            f"flushes={total_flushes} "
+            f"throughput={total/elapsed:.2f} file/s"
         )
         return failed_files
 
