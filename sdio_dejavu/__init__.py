@@ -136,10 +136,10 @@ class Dejavu:
                 try:
                     song_name, hashes, file_hash = fut.result(timeout=timeout_s)
 
-                    with self.db.cursor():
-                        sid = self.db.insert_song(song_name, file_hash, len(hashes))
-                        self.db.insert_hashes(sid, hashes)
-                        self.db.set_song_fingerprinted(sid)
+                    with self.db.cursor() as cur:
+                        sid = self.db.insert_song(song_name, file_hash, len(hashes), cur=cur)
+                        self.db.insert_hashes(sid, hashes, cur=cur)
+                        self.db.set_song_fingerprinted(sid, cur=cur)
 
                 except concurrent.futures.TimeoutError:
                     logger.error(f"[FP] timeout: {filename}")
@@ -198,9 +198,9 @@ class Dejavu:
                     song_name, hashes, file_hash = fut.result(timeout=timeout_s)
                     # DB writes in parent only (good). Wrap in retry + timeout.
                     with self.db.cursor() as cur:
-                        sid = self.db.insert_song(song_name, file_hash, len(hashes))
-                        self.db.insert_hashes(sid, hashes)
-                        self.db.set_song_fingerprinted(sid)
+                        sid = self.db.insert_song(song_name, file_hash, len(hashes), cur=cur)
+                        self.db.insert_hashes(sid, hashes, cur=cur)
+                        self.db.set_song_fingerprinted(sid, cur=cur)
                     completed += 1
                     if completed % 50 == 0:
                         logger.info(f"[FP] progress: {completed}/{len(futures)} (elapsed {time.perf_counter()-start_time:.1f}s)")

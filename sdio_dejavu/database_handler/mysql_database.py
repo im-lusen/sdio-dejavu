@@ -52,6 +52,16 @@ class MySQLDatabase(CommonDatabase):
         VALUES (%s, UNHEX(%s), %s);
     """
 
+    INSERT_FINGERPRINT_TEMPLATE = "(%s, UNHEX(%s), %s)"
+
+    INSERT_FINGERPRINT_VALUES = f"""
+        INSERT IGNORE INTO `{FINGERPRINTS_TABLENAME}` (
+                `{FIELD_SONG_ID}`
+            ,   `{FIELD_HASH}`
+            ,   `{FIELD_OFFSET}`)
+        VALUES %s;
+    """
+
     INSERT_SONG = f"""
         INSERT INTO `{SONGS_TABLENAME}` (`{FIELD_SONGNAME}`,`{FIELD_FILE_SHA1}`,`{FIELD_TOTAL_HASHES}`)
         VALUES (%s, UNHEX(%s), %s);
@@ -128,7 +138,7 @@ class MySQLDatabase(CommonDatabase):
         # the previous process.
         Cursor.clear_cache()
 
-    def insert_song(self, song_name: str, file_hash: str, total_hashes: int) -> int:
+    def insert_song(self, song_name: str, file_hash: str, total_hashes: int, cur=None) -> int:
         """
         Inserts a song name into the database, returns the new
         identifier of the song.
@@ -138,6 +148,9 @@ class MySQLDatabase(CommonDatabase):
         :param total_hashes: amount of hashes to be inserted on fingerprint table.
         :return: the inserted id.
         """
+        if cur is not None:
+            cur.execute(self.INSERT_SONG, (song_name, file_hash, total_hashes))
+            return cur.lastrowid
         with self.cursor() as cur:
             cur.execute(self.INSERT_SONG, (song_name, file_hash, total_hashes))
             return cur.lastrowid
@@ -165,16 +178,25 @@ class Cursor(object):
         cur.execute(query)
         ...
     """
+    _cache = queue.Queue(maxsize=5)
+
     def __init__(self, dictionary=False, **options):
         super().__init__()
 
-        self._cache = queue.Queue(maxsize=5)
-
+        conn = None
         try:
-            conn = self._cache.get_nowait()
-            # Ping the connection before using it from the cache.
-            conn.ping(True)
+            conn = Cursor._cache.get_nowait()
+            try:
+                if hasattr(conn, "ping"):
+                    conn.ping(True)
+                elif getattr(conn, "is_connected", None) and not conn.is_connected():
+                    conn = None
+            except Exception:
+                conn = None
         except queue.Empty:
+            conn = None
+
+        if conn is None:
             conn = mysql.connector.connect(**options)
 
         self.conn = conn
@@ -198,6 +220,6 @@ class Cursor(object):
 
         # Put it back on the queue
         try:
-            self._cache.put_nowait(self.conn)
+            Cursor._cache.put_nowait(self.conn)
         except queue.Full:
             self.conn.close()

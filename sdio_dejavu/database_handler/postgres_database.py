@@ -2,13 +2,12 @@ import queue
 
 import psycopg2
 from psycopg2.extras import DictCursor
-from datetime import datetime, timedelta
 from sdio_dejavu.base_classes.common_database import CommonDatabase
 from sdio_dejavu.config.settings import (FIELD_FILE_SHA1, FIELD_FINGERPRINTED,
                                     FIELD_HASH, FIELD_OFFSET, FIELD_SONG_ID,
                                     FIELD_HASH64,
                                     FIELD_SONGNAME, FIELD_TOTAL_HASHES,
-                                    FINGERPRINTS_TABLENAME, SONGS_TABLENAME,DAILY_PARTITION)
+                                    FINGERPRINTS_TABLENAME, SONGS_TABLENAME)
 
 
 class PostgreSQLDatabase(CommonDatabase):
@@ -102,6 +101,17 @@ class PostgreSQLDatabase(CommonDatabase):
             ,   "{FIELD_HASH64}"
             ,   "{FIELD_OFFSET}")
         VALUES (%s, decode(%s, 'hex'), %s, %s) ON CONFLICT DO NOTHING;
+    """
+
+    INSERT_FINGERPRINT_TEMPLATE = "(%s, decode(%s, 'hex'), %s, %s)"
+
+    INSERT_FINGERPRINT_VALUES = f"""
+        INSERT INTO "{FINGERPRINTS_TABLENAME}" (
+                "{FIELD_SONG_ID}"
+            ,   "{FIELD_HASH}"
+            ,   "{FIELD_HASH64}"
+            ,   "{FIELD_OFFSET}")
+        VALUES %s ON CONFLICT DO NOTHING;
     """
 
     INSERT_SONG = f"""
@@ -249,41 +259,6 @@ class PostgreSQLDatabase(CommonDatabase):
         super().__init__()
         self.cursor = cursor_factory(**options)
         self._options = options
-    
-    def ensure_daily_partition(self) -> None:
-        if DAILY_PARTITION:
-            pass
-        else:
-            return
-        today = datetime.now().date()
-        tomorrow = today + timedelta(days=1)
-        part_name = f'{FINGERPRINTS_TABLENAME}_{today.year}_{today.month:02d}_{today.day:02d}'
-        start = f"{today} 00:00:00+09"
-        end = f"{tomorrow} 00:00:00+09"
-
-        with self.cursor() as cur:
-            # 20251107: Advisory lock for daily partition creation (fingerprints)
-            try:
-                cur.execute("SELECT pg_advisory_lock(20251107);")
-
-
-                cur.execute(f"""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_tables WHERE tablename = '{part_name}'
-                        ) THEN
-                            EXECUTE format('
-                                CREATE TABLE IF NOT EXISTS {part_name}
-                                PARTITION OF {FINGERPRINTS_TABLENAME}
-                                FOR VALUES FROM (%L) TO (%L);
-                            ', '{start}', '{end}');
-                        END IF;
-                    END $$;
-                """)
-            finally:
-                # Release the lock
-                cur.execute("SELECT pg_advisory_unlock(20251107);")
 
         
     def after_fork(self) -> None:
@@ -291,7 +266,7 @@ class PostgreSQLDatabase(CommonDatabase):
         # the previous process.
         Cursor.clear_cache()
 
-    def insert_song(self, song_name: str, file_hash: str, total_hashes: int) -> int:
+    def insert_song(self, song_name: str, file_hash: str, total_hashes: int, cur=None) -> int:
         """
         Inserts a song name into the database, returns the new
         identifier of the song.
@@ -301,6 +276,9 @@ class PostgreSQLDatabase(CommonDatabase):
         :param total_hashes: amount of hashes to be inserted on fingerprint table.
         :return: the inserted id.
         """
+        if cur is not None:
+            cur.execute(self.INSERT_SONG, (song_name, file_hash, total_hashes))
+            return cur.fetchone()[0]
         with self.cursor() as cur:
             cur.execute(self.INSERT_SONG, (song_name, file_hash, total_hashes))
             return cur.fetchone()[0]
@@ -328,16 +306,25 @@ class Cursor(object):
         cur.execute(query)
         ...
     """
+    _cache = queue.Queue(maxsize=5)
+
     def __init__(self, dictionary=False, **options):
         super().__init__()
 
-        self._cache = queue.Queue(maxsize=5)
-
+        conn = None
         try:
-            conn = self._cache.get_nowait()
-            # Ping the connection before using it from the cache.
-            conn.ping(True)
+            conn = Cursor._cache.get_nowait()
+            try:
+                if hasattr(conn, "ping"):
+                    conn.ping(True)
+                elif getattr(conn, "closed", 0) != 0:
+                    conn = None
+            except Exception:
+                conn = None
         except queue.Empty:
+            conn = None
+
+        if conn is None:
             conn = psycopg2.connect(**options)
 
         self.conn = conn
@@ -364,6 +351,6 @@ class Cursor(object):
 
         # Put it back on the queue
         try:
-            self._cache.put_nowait(self.conn)
+            Cursor._cache.put_nowait(self.conn)
         except queue.Full:
             self.conn.close()

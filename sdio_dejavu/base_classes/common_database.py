@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 from sdio_dejavu.base_classes.base_database import BaseDatabase
 from loguru import logger
-from psycopg2.extras import execute_batch
+from psycopg2.extras import execute_values
 import time
 from functools import lru_cache
 from sdio_dejavu.config.settings import (
@@ -16,7 +16,6 @@ from sdio_dejavu.config.settings import (
     FIELD_TOTAL_HASHES,
     FINGERPRINTS_TABLENAME, 
     SONGS_TABLENAME,
-    DAILY_PARTITION,
     BLACKLISTED_HASH64_COUNT,
     FP_LOAD_BATCHSIZE,
     )
@@ -56,7 +55,6 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
             cur.execute(self.CREATE_FINGERPRINTS_TABLE)
             # Skip DELETE_UNFINGERPRINTED to avoid deadlocks
             #cur.execute(self.DELETE_UNFINGERPRINTED)
-        self.ensure_daily_partition()
     
     def setup(self) -> None:
         """Safely create tables if missing."""
@@ -75,7 +73,6 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
             cur.execute(self.CREATE_FINGERPRINTS_TABLE_SQL)
             #cur.execute(self.CREATE_FINGERPRINTS_TABLE_INDEX_HASH64)
             #cur.execute(self.CREATE_FINGERPRINTS_TABLE_INDEX_SONGID)
-        self.ensure_daily_partition()
     
     def empty(self) -> None:
         """
@@ -146,12 +143,15 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
 
         return count
 
-    def set_song_fingerprinted(self, song_id):
+    def set_song_fingerprinted(self, song_id, cur=None):
         """
         Sets a specific song as having all fingerprints in the database.
 
         :param song_id: song identifier.
         """
+        if cur is not None:
+            cur.execute(self.UPDATE_SONG_FINGERPRINTED, (song_id,))
+            return
         with self.cursor() as cur:
             cur.execute(self.UPDATE_SONG_FINGERPRINTED, (song_id,))
 
@@ -267,7 +267,7 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
             cur.execute(self.INSERT_FINGERPRINT, (fingerprint, song_id, offset))
 
     @abc.abstractmethod
-    def insert_song(self, song_name: str, file_hash: str, total_hashes: int) -> int:
+    def insert_song(self, song_name: str, file_hash: str, total_hashes: int, cur=None) -> int:
         """
         Inserts a song name into the database, returns the new
         identifier of the song.
@@ -278,12 +278,6 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
         :return: the inserted id.
         """
         pass
-
-    @abc.abstractmethod
-    def ensure_daily_partition(self) -> None:
-        """Ensures that a daily partition exists for the current date."""
-        pass
-
 
     def query(self, fingerprint: str = None) -> List[Tuple]:
         """
@@ -308,7 +302,13 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
         """
         return self.query(None)
 
-    def insert_hashes(self, song_id: int, hashes: list[Tuple[str, int,int]], batch_size: int = 1000) -> None:
+    def insert_hashes(
+        self,
+        song_id: int,
+        hashes: list[Tuple[str, int, int]],
+        batch_size: int = 1000,
+        cur=None,
+    ) -> None:
         """
         Insert a multitude of fingerprints.
 
@@ -318,12 +318,42 @@ class CommonDatabase(BaseDatabase, metaclass=abc.ABCMeta):
             - offset: Offset this hash was created from/at.
         :param batch_size: insert batches.
         """
-        self.ensure_daily_partition()
-        values = [(song_id, hsh, hsh_64,int(offset)) for hsh, hsh_64,offset in hashes]
+        insert_sql = self.INSERT_FINGERPRINT_VALUES
+        template = self.INSERT_FINGERPRINT_TEMPLATE
+
+        placeholder_count = template.count("%s")
+        values = []
+        for item in hashes:
+            if len(item) == 3:
+                hsh, hsh_64, offset = item
+            elif len(item) == 2:
+                hsh, offset = item
+                hsh_64 = None
+            else:
+                raise ValueError(f"Unexpected hash tuple length: {len(item)}")
+
+            if placeholder_count == 3:
+                values.append((song_id, hsh, int(offset)))
+            else:
+                values.append((song_id, hsh, hsh_64, int(offset)))
+
+        if getattr(self, "type", None) == "postgres":
+            if cur is not None:
+                execute_values(cur, insert_sql, values, template=template, page_size=batch_size)
+                return
+            with self.cursor() as cur:
+                execute_values(cur, insert_sql, values, template=template, page_size=batch_size)
+            return
+
+        # Fallback for non-Postgres drivers
+        if cur is not None:
+            for index in range(0, len(values), batch_size):
+                cur.executemany(self.INSERT_FINGERPRINT, values[index:index + batch_size])
+            return
 
         with self.cursor() as cur:
-            for index in range(0, len(hashes), batch_size):
-                execute_batch(cur,self.INSERT_FINGERPRINT, values[index: index + batch_size],batch_size)
+            for index in range(0, len(values), batch_size):
+                cur.executemany(self.INSERT_FINGERPRINT, values[index:index + batch_size])
 
     def return_matches(self, hashes: List[Tuple[str, int]],
                        batch_size: int = 1000) -> Tuple[List[Tuple[int, int]], Dict[int, int]]:
